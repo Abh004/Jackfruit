@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Distributed Canvas</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@400;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0a0f;
+      --surface:   #13131a;
+      --border:    #2a2a3a;
+      --accent:    #00ffcc;
+      --accent2:   #ff3366;
+      --text:      #e8e8f0;
+      --muted:     #555570;
+      --radius:    6px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      overflow: hidden;
+    }
+
+    /* ── GRID BACKGROUND ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(var(--border) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border) 1px, transparent 1px);
+      background-size: 40px 40px;
+      opacity: 0.3;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── LAYOUT ── */
+    #app {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* ── HEADER ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .logo {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+      color: var(--accent);
+    }
+
+    .logo span { color: var(--text); }
+
+    /* ── STATUS CLUSTER ── */
+    #status-cluster {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 4px 12px;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background 0.3s;
+    }
+
+    .dot.connected  { background: var(--accent);  box-shadow: 0 0 6px var(--accent); }
+    .dot.error      { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+    .dot.connecting { background: #ffaa00;        box-shadow: 0 0 6px #ffaa00;
+                      animation: pulse 1s infinite; }
+
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.3 } }
+
+    #status-text { font-size: 0.7rem; color: var(--muted); }
+
+    /* ── TOOLBAR ── */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .tool-label {
+      font-size: 0.65rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-right: 4px;
+    }
+
+    /* colour swatches */
+    .swatch {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: transform 0.15s, border-color 0.15s;
+    }
+    .swatch:hover        { transform: scale(1.2); }
+    .swatch.active       { border-color: var(--text); }
+
+    /* size buttons */
+    .size-btn {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 4px 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .size-btn:hover, .size-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ── ERASER BUTTON ── */
+    #eraser-btn {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 4px 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    #eraser-btn:hover {
+      border-color: #a78bfa;
+      color: #a78bfa;
+    }
+    #eraser-btn.active {
+      border-color: #a78bfa;
+      color: #a78bfa;
+      background: rgba(167, 139, 250, 0.1);
+      box-shadow: 0 0 8px rgba(167, 139, 250, 0.2);
+    }
+
+    /* ── ERASER CURSOR ── */
+    .cursor-eraser {
+      cursor: cell !important;
+    }
+
+    .divider {
+      width: 1px; height: 20px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+
+    #clear-btn {
+      margin-left: auto;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      padding: 4px 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #clear-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+
+    /* ── CANVAS AREA ── */
+    #canvas-wrap {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    /* ── LOG PANEL ── */
+    #log-panel {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      width: 280px;
+      max-height: 160px;
+      overflow-y: auto;
+      background: rgba(10,10,15,0.92);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px;
+      font-size: 0.65rem;
+      color: var(--muted);
+      backdrop-filter: blur(8px);
+      z-index: 10;
+    }
+    #log-panel::-webkit-scrollbar { width: 4px; }
+    #log-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .log-entry { margin-bottom: 3px; line-height: 1.5; }
+    .log-entry.ok   { color: var(--accent); }
+    .log-entry.warn { color: #ffaa00; }
+    .log-entry.err  { color: var(--accent2); }
+
+    /* ── RECONNECTING OVERLAY ── */
+    #overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(10,10,15,0.85);
+      backdrop-filter: blur(4px);
+      z-index: 20;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #overlay.show { display: flex; }
+    #overlay p {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.2rem;
+      color: var(--text);
+      animation: pulse 1.2s infinite;
+    }
+    #overlay small { font-size: 0.7rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- HEADER -->
+  <header>
+    <div class="logo">RAFT<span>canvas</span></div>
+    <div id="status-cluster">
+      <div class="status-pill">
+        <div class="dot connecting" id="ws-dot"></div>
+        <span id="ws-label">connecting</span>
+      </div>
+      <div id="status-text" id="leader-info">leader: —</div>
+    </div>
+  </header>
+
+  <!-- TOOLBAR -->
+  <div id="toolbar">
+    <span class="tool-label">color</span>
+    <div class="swatch active" style="background:#00ffcc" data-color="#00ffcc"></div>
+    <div class="swatch"       style="background:#ff3366" data-color="#ff3366"></div>
+    <div class="swatch"       style="background:#ffaa00" data-color="#ffaa00"></div>
+    <div class="swatch"       style="background:#a78bfa" data-color="#a78bfa"></div>
+    <div class="swatch"       style="background:#f8f8f0" data-color="#f8f8f0"></div>
+
+    <div class="divider"></div>
+    <span class="tool-label">size</span>
+    <button class="size-btn active" data-size="3">S</button>
+    <button class="size-btn"        data-size="7">M</button>
+    <button class="size-btn"        data-size="14">L</button>
+
+    <div class="divider"></div>
+    <button id="eraser-btn">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 20H7L3 16l11-11 6 6-3.5 3.5"/>
+        <path d="M6.5 17.5l4-4"/>
+      </svg>
+      eraser
+    </button>
+
+    <button id="clear-btn">clear local</button>
+  </div>
+
+  <!-- CANVAS -->
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+  </div>
+
+</div>
+
+<!-- RECONNECTING OVERLAY -->
+<div id="overlay">
+  <p>reconnecting to cluster...</p>
+  <small>leader election in progress — hang tight</small>
+</div>
+
+<!-- LOG PANEL -->
+<div id="log-panel"></div>
+
+<script>
+// CANVAS SETUP
+const canvas  = document.getElementById('canvas');
+const ctx     = canvas.getContext('2d');
+const wrap    = document.getElementById('canvas-wrap');
+
+function resizeCanvas() {
+  canvas.width  = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+ctx.lineCap  = 'round';
+ctx.lineJoin = 'round';
+
+// TOOL STATE
+let color     = '#00ffcc';
+let lineWidth = 3;
+let drawing   = false;
+let lastX     = 0;
+let lastY     = 0;
+let tool      = 'pen'; // 'pen' | 'eraser'
+
+// COLOR SWATCHES
+document.querySelectorAll('.swatch').forEach(s => {
+  s.addEventListener('click', () => {
+    document.querySelectorAll('.swatch').forEach(x => x.classList.remove('active'));
+    s.classList.add('active');
+    color = s.dataset.color;
+
+    // Switching to a colour deactivates eraser
+    if (tool === 'eraser') {
+      tool = 'pen';
+      eraserBtn.classList.remove('active');
+      canvas.classList.remove('cursor-eraser');
+      canvas.style.cursor = 'crosshair';
+      addLog('Switched to pen', '');
+    }
+  });
+});
+
+// SIZE BUTTONS
+document.querySelectorAll('.size-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.size-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    lineWidth = parseInt(b.dataset.size);
+  });
+});
+
+// ERASER BUTTON
+const eraserBtn = document.getElementById('eraser-btn');
+eraserBtn.addEventListener('click', () => {
+  if (tool === 'eraser') {
+    // Toggle off → back to pen
+    tool = 'pen';
+    eraserBtn.classList.remove('active');
+    canvas.style.cursor = 'crosshair';
+    addLog('Switched to pen', '');
+  } else {
+    tool = 'eraser';
+    eraserBtn.classList.add('active');
+    canvas.style.cursor = 'cell';
+    addLog('Eraser active', 'warn');
+  }
+});
+
+// CLEAR BUTTON
+document.getElementById('clear-btn').addEventListener('click', () => {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  addLog('Canvas cleared locally', 'warn');
+});
+
+// DRAWING — MOUSE + TOUCH
+function getPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const src  = e.touches ? e.touches[0] : e;
+  return {
+    x: (src.clientX - rect.left) * (canvas.width  / rect.width),
+    y: (src.clientY - rect.top)  * (canvas.height / rect.height),
+  };
+}
+
+canvas.addEventListener('pointerdown', e => {
+  drawing = true;
+  ({ x: lastX, y: lastY } = getPos(e));
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  const { x, y } = getPos(e);
+
+  // Draw locally for immediate feedback
+  drawLine(lastX, lastY, x, y, color, lineWidth);
+
+  // Send stroke to gateway (only for pen; eraser would need its own msg type)
+  if (tool === 'pen') {
+    sendStroke({ x0: lastX, y0: lastY, x1: x, y1: y, color, lineWidth });
+  }
+
+  lastX = x;
+  lastY = y;
+});
+
+canvas.addEventListener('pointerup',    () => { drawing = false; });
+canvas.addEventListener('pointerleave', () => { drawing = false; });
+
+function drawLine(x0, y0, x1, y1, col, width) {
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+
+  if (tool === 'eraser') {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.strokeStyle = 'rgba(0,0,0,1)';
+    ctx.lineWidth   = width * 5; // eraser is wider than the pen stroke
+  } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = col;
+    ctx.lineWidth   = width;
+  }
+
+  ctx.stroke();
+
+  // Always reset composite op after each operation
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// WEBSOCKET
+const WS_URL    = `ws://${location.host}/ws`;
+const overlay   = document.getElementById('overlay');
+const wsDot     = document.getElementById('ws-dot');
+const wsLabel   = document.getElementById('ws-label');
+const statusTxt = document.getElementById('status-text');
+
+let ws          = null;
+let reconnectMs = 1000;
+
+function connect() {
+  setStatus('connecting');
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    setStatus('connected');
+    overlay.classList.remove('show');
+    reconnectMs = 1000;
+    addLog('Connected to gateway', 'ok');
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+
+      if (msg.type === 'stroke' && msg.entry) {
+        const s = msg.entry.stroke;
+        // Draw remote stroke — skip if it looks like our own immediate paint
+        drawLine(s.x0, s.y0, s.x1, s.y1, s.color, s.lineWidth);
+      }
+
+      if (msg.type === 'leader') {
+        statusTxt.textContent = `leader: replica ${msg.leader_id}`;
+      }
+
+    } catch (err) {
+      addLog(`Parse error: ${err.message}`, 'err');
+    }
+  };
+
+  ws.onerror = () => {
+    addLog('WebSocket error', 'err');
+  };
+
+  ws.onclose = () => {
+    setStatus('error');
+    overlay.classList.add('show');
+    addLog(`Disconnected — retrying in ${reconnectMs}ms`, 'warn');
+    setTimeout(() => {
+      reconnectMs = Math.min(reconnectMs * 1.5, 8000);
+      connect();
+    }, reconnectMs);
+  };
+}
+
+function sendStroke(stroke) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(stroke));
+  }
+}
+
+function setStatus(s) {
+  wsDot.className  = `dot ${s}`;
+  wsLabel.textContent = s;
+}
+
+// LOG PANEL
+function addLog(msg, type = '') {
+  const panel = document.getElementById('log-panel');
+  const ts    = new Date().toLocaleTimeString('en', { hour12: false });
+  const div   = document.createElement('div');
+  div.className   = `log-entry ${type}`;
+  div.textContent = `${ts}  ${msg}`;
+  panel.appendChild(div);
+  panel.scrollTop = panel.scrollHeight;
+
+  // Keep last 40 entries
+  while (panel.children.length > 40) panel.removeChild(panel.firstChild);
+}
+
+// BOOT
+connect();
+addLog('Initialising RAFT canvas...', 'ok');
+</script>
+</body>
+</html>
