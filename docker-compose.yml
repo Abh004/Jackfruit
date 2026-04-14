@@ -1,96 +1,56 @@
 version: "3.8"
 
 services:
-  # Gateway
   gateway:
     build:
       context: ./gateway
-      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     environment:
       - REPLICA_URLS=http://replica1:5000,http://replica2:5000,http://replica3:5000
-    volumes:
-      - ./gateway:/usr/src/app
     depends_on:
-      replica1:
-        condition: service_healthy
-      replica2:
-        condition: service_healthy
-      replica3:
-        condition: service_healthy
+      replica1: { condition: service_healthy }
+      replica2: { condition: service_healthy }
+      replica3: { condition: service_healthy }
     networks:
       - raft-network
-    restart: unless-stopped
 
-  # REPLICA 1
+  # All replicas now build from the SAME folder: ./replica
   replica1:
     build:
       context: ./replica
-      dockerfile: Dockerfile
-    ports:
-      - "5001:5000"
     environment:
       - REPLICA_ID=1
-      - PORT=5000
       - PEERS=http://replica2:5000,http://replica3:5000
-    volumes:
-      - ./replica1:/usr/src/app
     networks:
       - raft-network
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
 
-  # REPLICA 2
   replica2:
     build:
       context: ./replica
-      dockerfile: Dockerfile
-    ports:
-      - "5002:5000"
     environment:
       - REPLICA_ID=2
-      - PORT=5000
       - PEERS=http://replica1:5000,http://replica3:5000
-    volumes:
-      - ./replica2:/usr/src/app
     networks:
       - raft-network
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
 
-  # REPLICA 3
   replica3:
     build:
       context: ./replica
-      dockerfile: Dockerfile
-    ports:
-      - "5003:5000"
     environment:
       - REPLICA_ID=3
-      - PORT=5000
       - PEERS=http://replica1:5000,http://replica2:5000
-    volumes:
-      - ./replica3:/usr/src/app
     networks:
       - raft-network
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
 
 networks:
   raft-network:
