@@ -683,6 +683,25 @@
                 ws.onmessage = (evt) => {
                     try {
                         const msg = JSON.parse(evt.data);
+
+                        if (msg.type === "init" && msg.log) {
+                            addLog(
+                                `Syncing ${msg.log.length} existing strokes...`,
+                                "ok",
+                            );
+                            msg.log.forEach((entry) => {
+                                const s = entry.stroke;
+                                drawLine(
+                                    s.x0,
+                                    s.y0,
+                                    s.x1,
+                                    s.y1,
+                                    s.color,
+                                    s.lineWidth,
+                                );
+                            });
+                        }
+
                         if (msg.type === "stroke" && msg.entry) {
                             const s = msg.entry.stroke;
                             drawLine(
