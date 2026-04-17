@@ -4,7 +4,8 @@ replica/main.py  —  Robust Mini-RAFT Replica Node
 Implements:
   - Persistent state (current_term, voted_for) saved to JSON
   - Full canvas state recovery via /canvas-state
-  - Standard RAFT Role transitions and log replication [cite: 20, 21]
+  - RAFT role transitions and log replication
+  - Follower catch-up using nextIndex/matchIndex backtracking
 """
 
 import asyncio
@@ -53,6 +54,10 @@ class RaftState:
         self.log: list[dict] = []
         self.commit_index: int = -1
 
+        # Leader bookkeeping (peer_url -> next index / matched index)
+        self.next_index: dict[str, int] = {}
+        self.match_index: dict[str, int] = {}
+
         # Election timer
         self.last_heartbeat: float = time.time()
         self.election_timeout: float = self._new_timeout()
@@ -83,6 +88,12 @@ class RaftState:
 
     def last_log_term(self) -> int:
         return self.log[-1]["term"] if self.log else 0
+
+    def init_leader_state(self):
+        # On becoming leader, initialize all followers to one past last log index
+        n = self.last_log_index() + 1
+        self.next_index = {peer: n for peer in PEER_URLS}
+        self.match_index = {peer: -1 for peer in PEER_URLS}
 
 
 state = RaftState()
@@ -123,10 +134,9 @@ class StrokeEntry(BaseModel):
 app = FastAPI(title=f"RAFT Replica {REPLICA_ID}")
 
 
-# NEW: State Recovery Endpoint
 @app.get("/canvas-state")
 async def get_canvas_state():
-    """Returns the full committed log for consistent canvas state after restarts."""
+    """Returns committed entries for state recovery."""
     return {
         "log": [e for e in state.log if e["index"] <= state.commit_index],
         "commit_index": state.commit_index,
@@ -141,6 +151,8 @@ async def health():
         "role": state.role,
         "term": state.current_term,
         "commit_index": state.commit_index,
+        "last_log_index": state.last_log_index(),
+        "leader_id": state.leader_id,
     }
 
 
@@ -162,7 +174,7 @@ async def request_vote(req: VoteRequest):
         return VoteResponse(term=state.current_term, vote_granted=False)
 
     state.voted_for = req.candidate_id
-    state.save_persistent_state()  # Persist vote
+    state.save_persistent_state()
     state.reset_election_timer()
     return VoteResponse(term=state.current_term, vote_granted=True)
 
@@ -180,19 +192,22 @@ async def append_entries(req: AppendEntriesRequest):
     state.leader_id = req.leader_id
     state.reset_election_timer()
 
-    # Consistency Check
+    # Consistency check
     if req.prev_log_index >= 0:
-        if (
-            req.prev_log_index > state.last_log_index()
-            or state.log[req.prev_log_index]["term"] != req.prev_log_term
-        ):
+        if req.prev_log_index > state.last_log_index():
             return AppendEntriesResponse(
                 term=state.current_term,
                 success=False,
                 match_index=state.last_log_index(),
             )
+        if state.log[req.prev_log_index]["term"] != req.prev_log_term:
+            return AppendEntriesResponse(
+                term=state.current_term,
+                success=False,
+                match_index=req.prev_log_index - 1,
+            )
 
-    # Log Update
+    # Apply/merge entries
     for entry in req.entries:
         idx = entry["index"]
         if idx <= state.last_log_index():
@@ -222,49 +237,146 @@ async def receive_stroke(entry: StrokeEntry):
     }
     state.log.append(log_entry)
 
-    acks = await _replicate_entry(log_entry)
-    if acks + 1 >= (len(PEER_URLS) + 1) // 2 + 1:
-        state.commit_index = log_entry["index"]
+    ok = await _replicate_until_quorum()
+    if ok:
         return {"committed": True, "entry": log_entry}
     raise HTTPException(status_code=500, detail="Quorum failed")
 
 
 def _step_down(new_term: int):
-    log.info(f"Stepping down to term {new_term}")
-    state.current_term = new_term
+    if new_term > state.current_term:
+        log.info(f"Stepping down to term {new_term}")
+        state.current_term = new_term
     state.role = Role.FOLLOWER
     state.voted_for = None
-    state.save_persistent_state()  # Persist state
+    state.save_persistent_state()
     state.reset_election_timer()
+    state.next_index = {}
+    state.match_index = {}
 
 
-async def _replicate_entry(entry: dict) -> int:
-    acks = 0
-    payload = AppendEntriesRequest(
-        term=state.current_term,
-        leader_id=REPLICA_ID,
-        prev_log_index=entry["index"] - 1,
-        prev_log_term=state.log[entry["index"] - 1]["term"]
-        if entry["index"] > 0
-        else 0,
-        entries=[entry],
-        leader_commit=state.commit_index,
-    )
-    async with httpx.AsyncClient(timeout=1.0) as client:
-        tasks = [
-            client.post(f"{peer}/append-entries", json=payload.model_dump())
-            for peer in PEER_URLS
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+def _become_leader():
+    state.role = Role.LEADER
+    state.leader_id = REPLICA_ID
+    state.init_leader_state()
+    log.info(f"🏆 LEADER term {state.current_term}")
 
-    for res in results:
-        if (
-            not isinstance(res, Exception)
-            and res.status_code == 200
-            and res.json().get("success")
-        ):
-            acks += 1
-    return acks
+
+async def _send_append_to_peer(
+    client: httpx.AsyncClient, peer: str, timeout: float = 0.6
+) -> bool:
+    """
+    Try to advance one follower using nextIndex backtracking.
+    Returns True if follower accepted append/heartbeat, else False.
+    """
+    if peer not in state.next_index:
+        state.next_index[peer] = state.last_log_index() + 1
+    if peer not in state.match_index:
+        state.match_index[peer] = -1
+
+    ni = max(0, state.next_index[peer])
+    prev_idx = ni - 1
+    prev_term = state.log[prev_idx]["term"] if prev_idx >= 0 else 0
+    entries = state.log[ni:]  # send suffix from nextIndex
+
+    payload = {
+        "term": state.current_term,
+        "leader_id": REPLICA_ID,
+        "prev_log_index": prev_idx,
+        "prev_log_term": prev_term,
+        "entries": entries,
+        "leader_commit": state.commit_index,
+    }
+
+    try:
+        res = await client.post(f"{peer}/append-entries", json=payload, timeout=timeout)
+    except Exception:
+        return False
+
+    if res.status_code != 200:
+        return False
+
+    data = res.json()
+    peer_term = data.get("term", 0)
+    if peer_term > state.current_term:
+        _step_down(peer_term)
+        return False
+
+    if data.get("success"):
+        # follower matched through prev_idx + len(entries)
+        matched = prev_idx + len(entries)
+        state.match_index[peer] = matched
+        state.next_index[peer] = matched + 1
+        return True
+
+    # backtrack on failure
+    hint = data.get("match_index")
+    if isinstance(hint, int):
+        state.next_index[peer] = max(0, hint + 1)
+    else:
+        state.next_index[peer] = max(0, ni - 1)
+    return False
+
+
+def _majority_count() -> int:
+    # total nodes = leader + peers
+    total = len(PEER_URLS) + 1
+    return total // 2 + 1
+
+
+def _advance_commit_index():
+    """
+    Leader commit rule:
+    For N > commit_index, if a majority has matchIndex >= N and log[N].term == currentTerm,
+    set commit_index = N.
+    """
+    if state.role != Role.LEADER or not state.log:
+        return
+
+    majority = _majority_count()
+    # candidate indexes are leader's log indexes
+    for n in range(state.last_log_index(), state.commit_index, -1):
+        if state.log[n]["term"] != state.current_term:
+            continue
+        count = 1  # leader itself
+        for peer in PEER_URLS:
+            if state.match_index.get(peer, -1) >= n:
+                count += 1
+        if count >= majority:
+            state.commit_index = n
+            break
+
+
+async def _replicate_until_quorum(max_rounds: int = 6) -> bool:
+    """
+    Replicate leader log to followers, allowing backtracking/catch-up rounds.
+    """
+    if state.role != Role.LEADER:
+        return False
+
+    majority = _majority_count()
+    async with httpx.AsyncClient() as client:
+        for _ in range(max_rounds):
+            tasks = [_send_append_to_peer(client, peer) for peer in PEER_URLS]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            _advance_commit_index()
+
+            # Check if latest entry is committed
+            if state.commit_index >= state.last_log_index():
+                return True
+
+            # Early quorum check for latest index
+            latest = state.last_log_index()
+            count = 1
+            for peer in PEER_URLS:
+                if state.match_index.get(peer, -1) >= latest:
+                    count += 1
+            if count >= majority:
+                state.commit_index = latest
+                return True
+
+    return False
 
 
 async def _raft_loop():
@@ -272,26 +384,22 @@ async def _raft_loop():
         await asyncio.sleep(0.05)
         if state.role == Role.LEADER:
             await _send_heartbeats()
-            await asyncio.sleep(HEARTBEAT_INTERVAL - 0.05)
+            await asyncio.sleep(max(HEARTBEAT_INTERVAL - 0.05, 0.01))
         elif state.role == Role.FOLLOWER:
+            if time.time() - state.last_heartbeat >= state.election_timeout:
+                await _start_election()
+        elif state.role == Role.CANDIDATE:
             if time.time() - state.last_heartbeat >= state.election_timeout:
                 await _start_election()
 
 
 async def _send_heartbeats():
-    payload = {
-        "term": state.current_term,
-        "leader_id": REPLICA_ID,
-        "prev_log_index": state.last_log_index(),
-        "prev_log_term": state.last_log_term(),
-        "entries": [],
-        "leader_commit": state.commit_index,
-    }
-    async with httpx.AsyncClient(timeout=0.5) as client:
-        tasks = [
-            client.post(f"{peer}/append-entries", json=payload) for peer in PEER_URLS
-        ]
+    if state.role != Role.LEADER:
+        return
+    async with httpx.AsyncClient() as client:
+        tasks = [_send_append_to_peer(client, peer, timeout=0.5) for peer in PEER_URLS]
         await asyncio.gather(*tasks, return_exceptions=True)
+    _advance_commit_index()
 
 
 async def _start_election():
@@ -309,21 +417,29 @@ async def _start_election():
         "last_log_index": state.last_log_index(),
         "last_log_term": state.last_log_term(),
     }
+
     async with httpx.AsyncClient(timeout=0.5) as client:
         tasks = [client.post(f"{peer}/request-vote", json=req) for peer in PEER_URLS]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for res in results:
-        if (
-            not isinstance(res, Exception)
-            and res.status_code == 200
-            and res.json().get("vote_granted")
-        ):
+        if isinstance(res, Exception):
+            continue
+        if res.status_code != 200:
+            continue
+
+        body = res.json()
+        peer_term = body.get("term", 0)
+        if peer_term > state.current_term:
+            _step_down(peer_term)
+            return
+
+        if body.get("vote_granted"):
             votes += 1
 
-    if votes >= (len(PEER_URLS) + 1) // 2 + 1:
-        state.role = Role.LEADER
-        log.info(f"🏆 LEADER term {state.current_term}")
+    if votes >= _majority_count():
+        _become_leader()
+        await _send_heartbeats()
     else:
         _step_down(state.current_term)
 

@@ -9,9 +9,12 @@ services:
     environment:
       - REPLICA_URLS=http://replica1:5000,http://replica2:5000,http://replica3:5000
     depends_on:
-      replica1: { condition: service_healthy }
-      replica2: { condition: service_healthy }
-      replica3: { condition: service_healthy }
+      replica1:
+        condition: service_healthy
+      replica2:
+        condition: service_healthy
+      replica3:
+        condition: service_healthy
     networks:
       - raft-network
 
