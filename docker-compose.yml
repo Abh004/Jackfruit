@@ -15,10 +15,11 @@ services:
     networks:
       - raft-network
 
-  # All replicas now build from the SAME folder: ./replica
   replica1:
     build:
       context: ./replica
+    volumes:
+      - ./replica:/usr/src/app
     environment:
       - REPLICA_ID=1
       - PEERS=http://replica2:5000,http://replica3:5000
@@ -31,6 +32,8 @@ services:
   replica2:
     build:
       context: ./replica
+    volumes:
+      - ./replica:/usr/src/app
     environment:
       - REPLICA_ID=2
       - PEERS=http://replica1:5000,http://replica3:5000
@@ -43,6 +46,8 @@ services:
   replica3:
     build:
       context: ./replica
+    volumes:
+      - ./replica:/usr/src/app
     environment:
       - REPLICA_ID=3
       - PEERS=http://replica1:5000,http://replica2:5000
